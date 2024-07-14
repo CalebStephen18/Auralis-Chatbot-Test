@@ -11,12 +11,12 @@ from langchain_community.llms import Ollama
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from typing import Dict, List
+import logging
 
 app = Flask(__name__)
 CORS(app, resources={r"/": {"origins": ""}})
 
-groq_api_key = "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"
-llm = ChatGroq(groq_api_key=groq_api_key, model_name="llama3-8b-8192")
+llm = Ollama(model="llama3")  
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
@@ -53,20 +53,39 @@ question_generator_chain = LLMChain(
     llm=llm,
     prompt=question_generator_prompt
 )
+import logging
 
-@app.route('/process_page', methods=['POST'])
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+@app.route('/v2/process_page', methods=['POST'])
 def process_page():
-    global vectorstores
-    print("Process page endpoint called")
+    content, url = retrieve_content()
+    create_vectorstore(content, url)
+    initial_questions = generate_questions(content)
+    
+    return jsonify({
+        'initial_questions': initial_questions,
+        'status': 'success'
+    })
+
+def retrieve_content():
+    logger.info("Process page endpoint called")
     if 'content' not in request.json:
-        print("No content in request")
+        logger.warning("No content in request")
         return jsonify({'error': 'No content provided'}), 400
     
     content = request.json['content']
     url = request.json.get('url', '')
-    print(f"Processing page with content length: {len(content)}")
-    print(f"URL: {url}")
+    logger.info(f"Processing page with content length: {len(content)}")
+    logger.info(f"URL: {url}")
     
+    return content, url
+
+def create_vectorstore(content, url):
+    global vectorstores
     text_splitter = CharacterTextSplitter(
         separator = "\n",
         chunk_size = 1000,
@@ -74,12 +93,13 @@ def process_page():
         length_function = len,
     )
     texts = text_splitter.split_text(content)
-    print(f"Split into {len(texts)} chunks")
+    logger.info(f"Split into {len(texts)} chunks")
     
     vectorstores[url] = FAISS.from_texts(texts, embeddings, metadatas=[{"source": url}] * len(texts))
     
-    print("Vector store created successfully")
-    
+    logger.info("Vector store created successfully")
+
+def generate_questions(content):
     initial_questions = question_generator_chain.run(content=content)
     
     processed_questions = []
@@ -88,37 +108,34 @@ def process_page():
             question = line.split(':', 1)[1].strip()
             processed_questions.append(question)
     
-    print(f"Initial questions generated: {processed_questions}")
+    logger.info(f"Initial questions generated: {processed_questions}")
     
-    return jsonify({
-        'initial_questions': processed_questions,
-        'status': 'success'
-    })
+    return processed_questions
 
-@app.route('/ask_question', methods=['POST'])
+@app.route('/v2/ask_question', methods=['POST'])
 def ask_question():
-    print("\n--- New question received ---")
-    print(f"Request data: {request.json}")
+    logger.info("\n--- New question received ---")
+    logger.info(f"Request data: {request.json}")
     
     if not vectorstores:
-        print("No pages processed yet")
+        logger.info("No pages processed yet")
         return jsonify({'error': 'Please process a page first'}), 400
 
     if 'query' not in request.json:
-        print("No query in request")
+        logger.info("No query in request")
         return jsonify({'error': 'No query provided'}), 400
 
     query = request.json['query']
     current_url = request.json.get('currentUrl', '')
     processed_urls = request.json.get('processedUrls', [])
-    print(f"Received question: {query}")
-    print(f"Current URL: {current_url}")
-    print(f"Processed URLs: {processed_urls}")
+    logger.info(f"Received question: {query}")
+    logger.info(f"Current URL: {current_url}")
+    logger.info(f"Processed URLs: {processed_urls}")
 
     result = tiered_search(query, current_url, processed_urls)
     answer = result['answer']
 
-    print(f"Final answer: {answer}")
+    logger.info(f"Final answer: {answer}")
 
     suggested_questions = question_generator_chain.run(content=answer)
     
@@ -128,7 +145,7 @@ def ask_question():
             question = line.split(':', 1)[1].strip()
             processed_questions.append(question)
 
-    print(f"Suggested questions: {processed_questions}")
+    logger.info(f"Suggested questions: {processed_questions}")
 
     return jsonify({
         'answer': answer,
@@ -137,39 +154,39 @@ def ask_question():
     })
 
 def tiered_search(query: str, current_url: str, processed_urls: List[str]):
-    print(f"\nPerforming tiered search for query: {query}")
-    print(f"Current URL: {current_url}")
-    print(f"Processed URLs: {processed_urls}")
+    logger.info(f"\nPerforming tiered search for query: {query}")
+    logger.info(f"Current URL: {current_url}")
+    logger.info(f"Processed URLs: {processed_urls}")
     
     if current_url in vectorstores:
-        print(f"Searching current URL: {current_url}")
+        logger.info(f"Searching current URL: {current_url}")
         result = search_single_store(query, vectorstores[current_url])
         if result['answer'].strip() and not result['answer'].lower().startswith("i don't know"):
-            print(f"Answer found in current URL: {current_url}")
+            logger.info(f"Answer found in current URL: {current_url}")
             return result
     
     # Only search other URLs if no answer was found in the current URL
     for url in reversed(processed_urls):
         if url != current_url and url in vectorstores:
-            print(f"Searching previous URL: {url}")
+            logger.info(f"Searching previous URL: {url}")
             result = search_single_store(query, vectorstores[url])
             if result['answer'].strip() and not result['answer'].lower().startswith("i don't know"):
-                print(f"Answer found in previous URL: {url}")
+                logger.info(f"Answer found in previous URL: {url}")
                 return result
     
-    print("No answer found in any processed URLs")
+    logger.info("No answer found in any processed URLs")
     return {"answer": "I couldn't find a relevant answer in the current or previous pages.", "source_documents": []}
 
 def search_single_store(query: str, store: FAISS):
     docs = store.similarity_search(query, k=3)
     
-    print(f"\nQuery: {query}")
-    print("Retrieved context chunks:")
+    logger.info(f"\nQuery: {query}")
+    logger.info("Retrieved context chunks:")
     for i, doc in enumerate(docs, 1):
-        print(f"Chunk {i}:")
-        print(doc.page_content)
-        print(f"Metadata: {doc.metadata}")
-        print("-" * 50)
+        logger.info(f"Chunk {i}:")
+        logger.info(doc.page_content)
+        logger.info(f"Metadata: {doc.metadata}")
+        logger.info("-" * 50)
     
     context = "\n".join(doc.page_content for doc in docs)
     

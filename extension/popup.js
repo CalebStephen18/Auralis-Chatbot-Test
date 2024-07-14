@@ -104,7 +104,7 @@ document.addEventListener('DOMContentLoaded', function() {
       showTypingIndicator();
   
       try {
-        const response = await fetch('http://localhost:5000/ask_question', {
+        const response = await fetch('http://localhost:5000/v2/ask_question', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -165,7 +165,7 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log("Got page content, length:", response.content.length);
         addMessage('System', 'Processing page...', 'ai');
         try {
-          const res = await fetch('http://localhost:5000/process_page', {
+          const res = await fetch('http://localhost:5000/v2/process_page', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -229,7 +229,7 @@ document.addEventListener('DOMContentLoaded', function() {
       console.log("Processing new page:", currentURL);
       chrome.tabs.sendMessage(currentTabId, {action: "getPageContent"}, function(response) {
         if (response && response.content) {
-          fetch('http://localhost:5000/process_page', {
+          fetch('http://localhost:5000/v2/process_page', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
