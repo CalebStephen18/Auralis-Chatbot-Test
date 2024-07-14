@@ -62,16 +62,6 @@ logger = logging.getLogger(__name__)
 
 @app.route('/v2/process_page', methods=['POST'])
 def process_page():
-    content, url = retrieve_content()
-    create_vectorstore(content, url)
-    initial_questions = generate_questions(content)
-    
-    return jsonify({
-        'initial_questions': initial_questions,
-        'status': 'success'
-    })
-
-def retrieve_content():
     logger.info("Process page endpoint called")
     if 'content' not in request.json:
         logger.warning("No content in request")
@@ -81,8 +71,13 @@ def retrieve_content():
     url = request.json.get('url', '')
     logger.info(f"Processing page with content length: {len(content)}")
     logger.info(f"URL: {url}")
+    create_vectorstore(content, url)
+    initial_questions = generate_questions(content)
     
-    return content, url
+    return jsonify({
+        'initial_questions': initial_questions,
+        'status': 'success'
+    })
 
 def create_vectorstore(content, url):
     global vectorstores
