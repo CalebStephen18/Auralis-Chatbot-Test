@@ -115,71 +115,122 @@ def generate_questions(content):
 @app.route('/v2/ask_question', methods=['POST'])
 def ask_question():
     logger.info("\n--- New question received ---")
-    logger.info(f"Request data: {request.json}")
+    query, current_url, processed_urls = extract_request_data()
     
-    if not vectorstores:
-        logger.info("No pages processed yet")
-        return jsonify({'error': 'Please process a page first'}), 400
+    if not is_valid_request(query):
+        return jsonify({'error': 'Invalid request'}), 400
 
-    if 'query' not in request.json:
-        logger.info("No query in request")
-        return jsonify({'error': 'No query provided'}), 400
+    result = tiered_search(query, current_url, processed_urls)
+    answer = result['answer']
+    context = result.get('context', '')
 
-    query = request.json['query']
+    logger.info(f"Final answer: {answer}")
+
+    suggested_questions = generate_suggested_questions(answer, context, processed_urls)
+
+    return jsonify({
+        'answer': answer,
+        'sources': result.get('sources', []),
+        'suggested_questions': suggested_questions
+    })
+
+def extract_request_data():
+    logger.info(f"Request data: {request.json}")
+    query = request.json.get('query', '')
     current_url = request.json.get('currentUrl', '')
     processed_urls = request.json.get('processedUrls', [])
     logger.info(f"Received question: {query}")
     logger.info(f"Current URL: {current_url}")
     logger.info(f"Processed URLs: {processed_urls}")
+    return query, current_url, processed_urls
 
-    result = tiered_search(query, current_url, processed_urls)
-    answer = result['answer']
+def is_valid_request(query):
+    if not vectorstores:
+        logger.info("No pages processed yet")
+        return False
+    if not query:
+        logger.info("No query in request")
+        return False
+    return True
 
-    logger.info(f"Final answer: {answer}")
-
-    suggested_questions = question_generator_chain.run(content=answer)
+def generate_suggested_questions(answer, context, processed_urls):
+    if answer == "I couldn't find a relevant answer in the current or previous pages.":
+        full_content = get_full_website_content(processed_urls)
+        suggested_questions = question_generator_chain.run(content=full_content)
+    else:
+        suggested_questions = question_generator_chain.run(content=context)
     
+    processed_questions = process_questions(suggested_questions)
+    logger.info(f"Suggested questions: {processed_questions}")
+    return processed_questions
+
+def get_full_website_content(processed_urls):
+    full_content = ""
+    for url in processed_urls:
+        if url in vectorstores:
+            docs = vectorstores[url].similarity_search("", k=100)  # Get all documents
+            full_content += "\n".join(doc.page_content for doc in docs)
+    return full_content
+
+def process_questions(suggested_questions):
     processed_questions = []
     for line in suggested_questions.split('\n'):
         if line.strip().startswith('Q'):
             question = line.split(':', 1)[1].strip()
             processed_questions.append(question)
-
-    logger.info(f"Suggested questions: {processed_questions}")
-
-    return jsonify({
-        'answer': answer,
-        'sources': result.get('sources', []),
-        'suggested_questions': processed_questions
-    })
+    return processed_questions
 
 def tiered_search(query: str, current_url: str, processed_urls: List[str]):
     logger.info(f"\nPerforming tiered search for query: {query}")
     logger.info(f"Current URL: {current_url}")
     logger.info(f"Processed URLs: {processed_urls}")
     
+    result = search_current_url(query, current_url)
+    if result:
+        return result
+    
+    result = search_previous_urls(query, current_url, processed_urls)
+    if result:
+        return result
+    
+    logger.info("No answer found in any processed URLs")
+    return {"answer": "I couldn't find a relevant answer in the current or previous pages.", "source_documents": [], "context": ""}
+
+def search_current_url(query, current_url):
     if current_url in vectorstores:
         logger.info(f"Searching current URL: {current_url}")
         result = search_single_store(query, vectorstores[current_url])
-        if result['answer'].strip() and not result['answer'].lower().startswith("i don't know"):
+        if is_valid_answer(result['answer']):
             logger.info(f"Answer found in current URL: {current_url}")
             return result
-    
-    # Only search other URLs if no answer was found in the current URL
+    return None
+
+def search_previous_urls(query, current_url, processed_urls):
     for url in reversed(processed_urls):
         if url != current_url and url in vectorstores:
             logger.info(f"Searching previous URL: {url}")
             result = search_single_store(query, vectorstores[url])
-            if result['answer'].strip() and not result['answer'].lower().startswith("i don't know"):
+            if is_valid_answer(result['answer']):
                 logger.info(f"Answer found in previous URL: {url}")
                 return result
-    
-    logger.info("No answer found in any processed URLs")
-    return {"answer": "I couldn't find a relevant answer in the current or previous pages.", "source_documents": []}
+    return None
+
+def is_valid_answer(answer):
+    return answer.strip() and not answer.lower().startswith("i don't know")
 
 def search_single_store(query: str, store: FAISS):
     docs = store.similarity_search(query, k=3)
+    log_retrieved_context(query, docs)
+    context = "\n".join(doc.page_content for doc in docs)
     
+    qa = create_qa_chain(store)
+    
+    result = qa({"question": query, "chat_history": []})
+    result['source_documents'] = docs
+    result['context'] = context
+    return result
+
+def log_retrieved_context(query, docs):
     logger.info(f"\nQuery: {query}")
     logger.info("Retrieved context chunks:")
     for i, doc in enumerate(docs, 1):
@@ -187,19 +238,14 @@ def search_single_store(query: str, store: FAISS):
         logger.info(doc.page_content)
         logger.info(f"Metadata: {doc.metadata}")
         logger.info("-" * 50)
-    
-    context = "\n".join(doc.page_content for doc in docs)
-    
-    qa = ConversationalRetrievalChain.from_llm(
+
+def create_qa_chain(store):
+    return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=store.as_retriever(search_kwargs={"k": 3}),
         memory=memory,
         combine_docs_chain_kwargs={"prompt": QA_PROMPT}
     )
-    
-    result = qa({"question": query, "chat_history": []})
-    result['source_documents'] = docs
-    return result
 
 if __name__ == '__main__':
     app.run(debug=True, use_reloader = False)
